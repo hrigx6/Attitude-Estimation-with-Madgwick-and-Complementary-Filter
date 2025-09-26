@@ -1,4 +1,4 @@
-# IMU & Magnetometer Sensor Fusion — Complementary vs. Madgwick vs. PX4 EKF
+# Complementary vs. Madgwick on Pixhawk IMU
 
 This project is a hands-on exploration of attitude estimation (roll, pitch, yaw) from raw IMU + magnetometer data, and a comparison of simple filters against PX4’s onboard EKF.
 
