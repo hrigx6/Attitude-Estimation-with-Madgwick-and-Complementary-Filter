@@ -1,65 +1,147 @@
-#COMPLIMENTARY FILTER for PX4 ardupilot pixhawk
-
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from math import atan2, sqrt, degrees, radians, sin, cos
+from math import atan2, sqrt, degrees
 from scipy.spatial.transform import Rotation as R
-from scipy.signal import butter, filtfilt
 
-# Load CSVs 
-imu_df = pd.read_csv('C:/Users/Hrigved/Desktop/ATTITUDE ESTIMATION/csv/imu1.csv')
-mag_df = pd.read_csv('C:/Users/Hrigved/Desktop/ATTITUDE ESTIMATION/csv/mag1.csv')
-ekf_df = pd.read_csv('C:/Users/Hrigved/Desktop/ATTITUDE ESTIMATION/csv/ekf_data1.csv')
 
-# Time Handling 
-imu_time = (imu_df['%time'] - imu_df['%time'].min()) / 1e9
-dt = np.diff(imu_time)
+# Funtion to use calibrated mag data if available else proceed with raw data
+import json
 
-# Initialize 
-alpha = 0.90
-roll, pitch, yaw = 0, 0, 0
+def get_calibrated_mag_arrays(mag_df, cal_json_path="mag_cal.json", return_source=False):
+    """
+    Returns (mx, my, mz) as float arrays.
+    Priority:
+      1) If DataFrame has ['mag_x_cal','mag_y_cal','mag_z_cal'] -> use those.
+      2) Else, if mag_cal.json exists -> apply A @ (raw - b) and return.
+      3) Else -> return raw ['magnetic_field_*' or 'field.magnetic_field.*'].
+    """
+    
+    if all(c in mag_df.columns for c in ["mag_x_cal","mag_y_cal","mag_z_cal"]):
+        mx = mag_df["mag_x_cal"].to_numpy(float)
+        my = mag_df["mag_y_cal"].to_numpy(float)
+        mz = mag_df["mag_z_cal"].to_numpy(float)
+        return (mx, my, mz, "df:cal_cols") if return_source else (mx, my, mz)
+
+    # raw getters
+    def get_raw(col_short):
+        if f"magnetic_field_{col_short}" in mag_df.columns:
+            return mag_df[f"magnetic_field_{col_short}"].to_numpy(float)
+        return mag_df[f"field.magnetic_field.{col_short}"].to_numpy(float)
+
+    mx_raw = get_raw("x"); my_raw = get_raw("y"); mz_raw = get_raw("z")
+
+    # 2) try mag_cal.json
+    try:
+        with open(cal_json_path, "r") as f:
+            p = json.load(f)
+        b = np.asarray(p["offset"], float)
+        A = np.asarray(p["matrix"], float)
+        Mraw = np.column_stack([mx_raw, my_raw, mz_raw])
+        Mcal = (A @ (Mraw - b).T).T
+        mx, my, mz = Mcal[:,0], Mcal[:,1], Mcal[:,2]
+        return (mx, my, mz, "json:mag_cal") if return_source else (mx, my, mz)
+    except Exception:
+        # 3) fallback: raw
+        return (mx_raw, my_raw, mz_raw, "df:raw") if return_source else (mx_raw, my_raw, mz_raw)
+
+
+
+ 
+### User controls [change the params to adjust the filter]
+
+# Choose a time window to visualize (seconds from start). Set both to None to plot the full run.
+SEGMENT_START_SEC = 30   # e.g., 5.0
+SEGMENT_END_SEC   = 60   # e.g., 15.0
+
+# Decimate plotted samples to reduce density (1 = no decimation, 5 = every 5th point, etc.)
+PLOT_EVERY_N = 1
+
+# Complementary filter cutoffs (Hz). Higher cutoff => more accel/mag trust (less gyro dominance)
+FC_ROLL_PITCH = 10.0
+FC_YAW        = 2.0
+
+# Accel gating: reduce accel trust when |a| is far from g (during linear accel)
+USE_ACCEL_GATING = True
+G = 9.80665
+ACCEL_GATING_TOL = 2.0  # m/s^2 tolerance around g
+
+
+### Load data
+imu_df = pd.read_csv('/content/main_bag_imu.csv').sort_values('timestamp').reset_index(drop=True)
+mag_df = pd.read_csv('/content/main_bag_mag.csv').sort_values('timestamp').reset_index(drop=True)
+ekf_df = pd.read_csv('/content/main_bag_ekf.csv').sort_values('timestamp').reset_index(drop=True)
+
+imu_time = imu_df['timestamp'] - imu_df['timestamp'].min()
+mag_time = mag_df['timestamp'] - mag_df['timestamp'].min()
+
+# Match IMU & MAG lengths
+length = min(len(imu_df), len(mag_df)) - 1
+dt = np.diff(imu_time.values)
+
+# Get magnetometer arrays from the mag_calibrated if available function
+mx_arr, my_arr, mz_arr, mag_src = get_calibrated_mag_arrays(mag_df, cal_json_path="mag_cal.json", return_source=True)
+print("Mag source:", mag_src)
+
+
+# =========================
+# Complementary filter
+# =========================
+def alpha_from_fc(fc, dt_s):
+    tau = 1.0 / (2.0 * np.pi * fc)           # time constant
+    return tau / (tau + dt_s)                # α closer to 1 => more gyro, closer to 0 => more accel/mag
+
+roll = pitch = yaw = 0.0
 
 roll_list, pitch_list, yaw_list = [], [], []
 roll_accel_list, pitch_accel_list, yaw_mag_list = [], [], []
 roll_gyro_list, pitch_gyro_list, yaw_gyro_list = [], [], []
 
-
-def butter_lowpass(cutoff, fs, order=3):
-    return butter(order, cutoff / (0.5 * fs), btype='low', analog=False)
-
-def butter_highpass(cutoff, fs, order=3):
-    return butter(order, cutoff / (0.5 * fs), btype='high', analog=False)
-
-# Complementary Filter 
-length = min(len(imu_df), len(mag_df)) - 1
 for i in range(1, length):
-    ax = imu_df['field.linear_acceleration.x'][i]
-    ay = imu_df['field.linear_acceleration.y'][i]
-    az = imu_df['field.linear_acceleration.z'][i]
-    gx = imu_df['field.angular_velocity.x'][i]
-    gy = imu_df['field.angular_velocity.y'][i]
-    gz = imu_df['field.angular_velocity.z'][i]
-    mx = mag_df['field.magnetic_field.x'][i]
-    my = mag_df['field.magnetic_field.y'][i]
-    mz = mag_df['field.magnetic_field.z'][i]
+    # IMU
+    ax = imu_df['linear_acceleration_x'].iloc[i]
+    ay = imu_df['linear_acceleration_y'].iloc[i]
+    az = imu_df['linear_acceleration_z'].iloc[i]
+    gx = imu_df['angular_velocity_x'].iloc[i]
+    gy = imu_df['angular_velocity_y'].iloc[i]
+    gz = imu_df['angular_velocity_z'].iloc[i]
 
-    dt_i = dt[i - 1]
+    
+    # MAG 
+    mx = mx_arr[i]; my = my_arr[i]; mz = mz_arr[i]
+ 
 
+    dt_i = float(dt[i - 1]) if i - 1 < len(dt) else 0.0
+
+    # accel -> roll/pitch
     pitch_a = atan2(-ax, sqrt(ay**2 + az**2))
-    roll_a = atan2(ay, az)
+    roll_a  = atan2(ay, az)
 
+    # gyro integrate
     pitch_g = pitch + gy * dt_i
-    roll_g = roll + gx * dt_i
-    yaw_g = yaw + gz * dt_i
+    roll_g  = roll  + gx * dt_i
+    yaw_g   = yaw   + gz * dt_i
 
-    pitch = alpha * pitch_g + (1 - alpha) * pitch_a
-    roll = alpha * roll_g + (1 - alpha) * roll_a
+    # tilt-compensated heading from mag
+    Xh = mx * np.cos(pitch) + mz * np.sin(pitch)
+    Yh = mx * np.sin(roll) * np.sin(pitch) + my * np.cos(roll) - mz * np.sin(roll) * np.cos(pitch)
+    yaw_m = np.arctan2(-Yh, Xh)
 
-    Xh = mx * cos(pitch) + mz * sin(pitch)
-    Yh = mx * sin(roll) * sin(pitch) + my * cos(roll) - mz * sin(roll) * cos(pitch)
-    yaw_m = atan2(-Yh, Xh)
-    yaw = alpha * yaw_g + (1 - alpha) * yaw_m
+    # dynamic α from cutoffs
+    alpha_rp = alpha_from_fc(FC_ROLL_PITCH, dt_i)
+    alpha_y  = alpha_from_fc(FC_YAW,        dt_i)
+
+    # accel gating
+    if USE_ACCEL_GATING:
+        acc_norm = sqrt(ax*ax + ay*ay + az*az)
+        if abs(acc_norm - G) > ACCEL_GATING_TOL:
+            scale = min(1.0, (abs(acc_norm - G) - ACCEL_GATING_TOL) / (2.0 * ACCEL_GATING_TOL))
+            alpha_rp = alpha_rp + (1.0 - alpha_rp) * scale  # nudge toward gyro when accel unreliable
+
+    # complementary update
+    pitch = alpha_rp * pitch_g + (1.0 - alpha_rp) * pitch_a
+    roll  = alpha_rp * roll_g  + (1.0 - alpha_rp) * roll_a
+    yaw   = alpha_y  * yaw_g   + (1.0 - alpha_y)  * yaw_m
 
     roll_accel_list.append(degrees(roll_a))
     pitch_accel_list.append(degrees(pitch_a))
@@ -71,109 +153,87 @@ for i in range(1, length):
     pitch_list.append(degrees(pitch))
     yaw_list.append(degrees(yaw))
 
-# EKF Orientation to Euler 
-ekf_time = (ekf_df['%time'] - ekf_df['%time'].min()) / 1e9
-ekf_roll, ekf_pitch, ekf_yaw = [], [], []
-
-for i in range(len(ekf_df)):
-    qx = ekf_df['field.orientation.x'][i]
-    qy = ekf_df['field.orientation.y'][i]
-    qz = ekf_df['field.orientation.z'][i]
-    qw = ekf_df['field.orientation.w'][i]
-    r = R.from_quat([qx, qy, qz, qw])
-    (roll, pitch, yaw) = r.as_euler('xyz', degrees=True)
-
-    ekf_roll.append(roll)
-    ekf_pitch.append(pitch)
-    ekf_yaw.append(yaw)
-
-# Unwrap Yaw 
+# Unwrap yaw 
 yaw_list_unwrapped = np.degrees(np.unwrap(np.radians(yaw_list)))
-yaw_mag_unwrapped = np.degrees(np.unwrap(np.radians(yaw_mag_list)))
+yaw_mag_unwrapped  = np.degrees(np.unwrap(np.radians(yaw_mag_list)))
 yaw_gyro_unwrapped = np.degrees(np.unwrap(np.radians(yaw_gyro_list)))
-ekf_yaw_unwrapped = np.degrees(np.unwrap(np.radians(ekf_yaw)))
+
+# Time vector aligned with the complementary arrays
+t_imu = imu_time.values[1:length]
 
 
+# Choose a segment (or full run) and decimate from above set params (USER CONTROLS section)
 
-# Plotting
-def plot_all_angles(time, roll_data, pitch_data, yaw_data, ekf_data):
-    fig, axs = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
+def select_segment(t, *arrays, start=SEGMENT_START_SEC, end=SEGMENT_END_SEC, every=PLOT_EVERY_N):
+    if start is None or end is None:
+        mask = np.ones_like(t, dtype=bool)
+    else:
+        mask = (t >= float(start)) & (t <= float(end))
 
-    # Roll
-    axs[0].plot(time, roll_data['filt'], label='Roll (Complementary)', color='black', linewidth=1)
-    axs[0].plot(time, roll_data['raw1'], label='Roll (Accel/Mag)', linestyle='-', linewidth=1)
-    axs[0].plot(time, roll_data['raw2'], label='Roll (Gyro)', linestyle='-', linewidth=1)
-    axs[0].plot(time[:len(ekf_data['roll'])], ekf_data['roll'], label='Roll (EKF)', linestyle='-', linewidth=1)
-    axs[0].set_ylabel('Roll (°)')
-    axs[0].legend()
-    axs[0].grid(True)
+    idx = np.nonzero(mask)[0]
+    if len(idx) == 0:
+        # fall back to full if segment empty
+        idx = np.arange(len(t))
 
-    # Pitch
-    axs[1].plot(time, pitch_data['filt'], label='Pitch (Complementary)', color='black', linewidth=1)
-    axs[1].plot(time, pitch_data['raw1'], label='Pitch (Accel/Mag)', linestyle='-', linewidth=1)
-    axs[1].plot(time, pitch_data['raw2'], label='Pitch (Gyro)', linestyle='-', linewidth=1)
-    axs[1].plot(time[:len(ekf_data['pitch'])], ekf_data['pitch'], label='Pitch (EKF)', linestyle='-', linewidth=1)
-    axs[1].set_ylabel('Pitch (°)')
-    axs[1].legend()
-    axs[1].grid(True)
+    # decimate
+    idx = idx[::max(1, int(every))]
 
-    # Yaw
-    axs[2].plot(time, yaw_data['filt'], label='Yaw (Complementary)', color='black', linewidth=1)
-    axs[2].plot(time, yaw_data['raw1'], label='Yaw (Accel/Mag)', linestyle='-', linewidth=1)
-    axs[2].plot(time, yaw_data['raw2'], label='Yaw (Gyro)', linestyle='-', linewidth=1)
-    axs[2].plot(time[:len(ekf_data['yaw'])], ekf_data['yaw'], label='Yaw (EKF)', linestyle='-', linewidth=1)
-    axs[2].set_ylabel('Yaw (°)')
-    axs[2].set_xlabel('Time (s)')
-    axs[2].legend()
-    axs[2].grid(True)
+    t_sel = t[idx]
+    arrays_sel = [np.asarray(a)[idx] for a in arrays]
+    return (t_sel, *arrays_sel)
 
-    plt.tight_layout()
-    plt.show()
-
-
-plot_all_angles(
-    imu_time[1:length],
-    roll_data={
-        'filt': roll_list,
-        'raw1': roll_accel_list,
-        'raw2': roll_gyro_list
-    },
-    pitch_data={
-        'filt': pitch_list,
-        'raw1': pitch_accel_list,
-        'raw2': pitch_gyro_list
-    },
-    yaw_data={
-        'filt': yaw_list_unwrapped,
-        'raw1': yaw_mag_unwrapped,
-        'raw2': yaw_gyro_unwrapped
-    },
-    ekf_data={
-        'roll': ekf_roll[1:length],
-        'pitch': ekf_pitch[1:length],
-        'yaw': ekf_yaw_unwrapped[1:length]
-    }
+(t_plot,
+ roll_filt_p, roll_acc_p, roll_gyro_p,
+ pitch_filt_p, pitch_acc_p, pitch_gyro_p,
+ yaw_filt_p, yaw_mag_p, yaw_gyro_p) = select_segment(
+    t_imu,
+    roll_list, roll_accel_list, roll_gyro_list,
+    pitch_list, pitch_accel_list, pitch_gyro_list,
+    yaw_list_unwrapped, yaw_mag_unwrapped, yaw_gyro_unwrapped
 )
 
+# =========================
+# Plotting 
+# =========================
+fig, axs = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
 
-# Save complementary Euler outputs
+# Roll
+axs[0].plot(t_plot, roll_filt_p, label='Roll (Complementary)', linewidth=1)
+axs[0].plot(t_plot, roll_acc_p,  label='Roll (Accel-derived)', linewidth=1)
+axs[0].plot(t_plot, roll_gyro_p, label='Roll (Gyro integ.)',   linewidth=1)
+axs[0].set_ylabel('Roll (°)')
+axs[0].legend(); axs[0].grid(True)
+
+# Pitch
+axs[1].plot(t_plot, pitch_filt_p, label='Pitch (Complementary)', linewidth=1)
+axs[1].plot(t_plot, pitch_acc_p,  label='Pitch (Accel-derived)', linewidth=1)
+axs[1].plot(t_plot, pitch_gyro_p, label='Pitch (Gyro integ.)',   linewidth=1)
+axs[1].set_ylabel('Pitch (°)')
+axs[1].legend(); axs[1].grid(True)
+
+# Yaw
+axs[2].plot(t_plot, yaw_filt_p, label='Yaw (Complementary)', linewidth=1)
+axs[2].plot(t_plot, yaw_mag_p,  label='Yaw (Mag-derived)',   linewidth=1)
+axs[2].plot(t_plot, yaw_gyro_p, label='Yaw (Gyro integ.)',   linewidth=1)
+axs[2].set_ylabel('Yaw (°)')
+axs[2].set_xlabel('Time (s)')
+axs[2].legend(); axs[2].grid(True)
+
+plt.tight_layout()
+plt.show()
+
+
+# Save outputs
 out_comp = pd.DataFrame({
-    'timestamp': imu_time[1:length],
-    'roll': roll_list,
-    'pitch': pitch_list,
-    'yaw': yaw_list_unwrapped
+    'timestamp': imu_time.values[1:length],
+    'roll_deg':  roll_list,
+    'pitch_deg': pitch_list,
+    'yaw_deg':   yaw_list_unwrapped
 })
-out_comp.to_csv('result_csv/complementary_euler.csv', index=False)
+out_comp.to_csv('complementary_euler.csv', index=False)
 
-# Save EKF quats from your ekf_df
-ekf_out = pd.DataFrame({
-    'timestamp': (ekf_df['%time'] - ekf_df['%time'].min())/1e9,
-    'qw': ekf_df['field.orientation.w'],
-    'qx': ekf_df['field.orientation.x'],
-    'qy': ekf_df['field.orientation.y'],
-    'qz': ekf_df['field.orientation.z'],
-})
-
-
-
-ekf_out.to_csv('result_csv/px4_attitude.csv', index=False)
+# EKF quaternions (kept for downstream use; not plotted)
+ekf_out = ekf_df[['timestamp','orientation_w','orientation_x','orientation_y','orientation_z']].copy()
+ekf_out['timestamp'] = ekf_out['timestamp'] - ekf_out['timestamp'].min()
+ekf_out = ekf_out.rename(columns={'orientation_w':'qw','orientation_x':'qx','orientation_y':'qy','orientation_z':'qz'})
+ekf_out.to_csv('px4_attitude.csv', index=False)
