@@ -30,9 +30,9 @@ The focus is on learning: calibrating sensors, implementing filters step-by-step
 
 ## Repository structure
 
-* `mag_calibrate.py` — Magnetometer calibration.
-* `complementary.py` — Complementary filter (IMU + mag).
-* `madgwick.py` — Madgwick filter (IMU + yaw mag correction).
+* `mag_calibration.py` — Magnetometer calibration.
+* `complementary_filter.py` — Complementary filter (IMU + mag).
+* `madgwick_filter.py` — Madgwick filter (IMU + yaw mag correction).
 * `compare.py` — Aligns Complementary & Madgwick with PX4 EKF and computes metrics.
 * `plots/` — Auto-saved figures + metrics.
 * Example CSVs:
