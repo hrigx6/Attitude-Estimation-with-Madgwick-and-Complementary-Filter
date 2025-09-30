@@ -5,7 +5,7 @@ This project is a hands-on exploration of attitude estimation (roll, pitch, yaw)
 The focus is on learning: calibrating sensors, implementing filters step-by-step, and visualizing how they stack up to PX4’s “ground truth.”
 
 ---
-
+( mag calibration is still in progress to improve thr yaw errors )
 <img width="1189" height="989" alt="T_15_40_secs" src="https://github.com/user-attachments/assets/bde1cb0d-afdb-459c-8fd8-0e5d76fc9812" />
 
 
