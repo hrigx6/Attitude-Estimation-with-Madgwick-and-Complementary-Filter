@@ -6,6 +6,9 @@ The focus is on learning: calibrating sensors, implementing filters step-by-step
 
 ---
 
+<img width="1189" height="989" alt="T_15_40_secs" src="https://github.com/user-attachments/assets/bde1cb0d-afdb-459c-8fd8-0e5d76fc9812" />
+
+
 ## What this project does
 
 1. **Magnetometer Calibration**
